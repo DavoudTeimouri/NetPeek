@@ -1,0 +1,55 @@
+name: Bug report
+description: A check reports something that is not true
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issue? Do not file it here — see [SECURITY.md](https://github.com/DavoudTeimouri/NetPeek/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or image tag
+      placeholder: 0.2.0, ghcr.io/davoudteimouri/netpeek:sha-85e5d9e
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command
+      options:
+        - info
+        - dns
+        - tcp
+        - http
+        - svc
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Kubernetes 1.30, Cilium CNI, arm64, launched with kubectl debug
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What the command should have reported, and why you are sure.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: Paste the output, preferably with `--json`.
+      render: shell
+    validations:
+      required: true

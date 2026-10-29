@@ -90,7 +90,9 @@ fn main() -> ExitCode {
         },
         "svc" => {
             if rest.len() < 2 {
-                eprintln!("netpeek: svc needs a service name, e.g. netpeek svc kubernetes -n default");
+                eprintln!(
+                    "netpeek: svc needs a service name, e.g. netpeek svc kubernetes -n default"
+                );
                 ExitCode::from(2)
             } else {
                 run_svc(&opts, &rest[1..])
@@ -104,7 +106,11 @@ fn main() -> ExitCode {
 }
 
 fn parse_args(argv: &[String]) -> Result<(Opts, Vec<String>), String> {
-    let mut o = Opts { json: false, timeout: Duration::from_secs(5), verbose: false };
+    let mut o = Opts {
+        json: false,
+        timeout: Duration::from_secs(5),
+        verbose: false,
+    };
     let mut rest = Vec::new();
     let mut i = 0;
     while i < argv.len() {
@@ -136,7 +142,11 @@ struct DnsCfg {
 }
 
 fn parse_resolv(txt: &str) -> DnsCfg {
-    let mut c = DnsCfg { nameservers: vec![], search: vec![], ndots: "1".into() };
+    let mut c = DnsCfg {
+        nameservers: vec![],
+        search: vec![],
+        ndots: "1".into(),
+    };
     for line in txt.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -183,7 +193,9 @@ fn ip_cmd(args: &[&str]) -> Option<String> {
 }
 
 fn read_trim(p: &str) -> String {
-    fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default()
+    fs::read_to_string(p)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 fn iface_line(line: &str) -> Option<(String, Option<String>)> {
@@ -341,8 +353,22 @@ fn run_info(o: &Opts) -> ExitCode {
     }
 
     println!("\ndns");
-    println!("  nameservers {}", if dns.nameservers.is_empty() { "-".to_string() } else { dns.nameservers.join(" ") });
-    println!("  search      {}", if dns.search.is_empty() { "-".to_string() } else { dns.search.join(" ") });
+    println!(
+        "  nameservers {}",
+        if dns.nameservers.is_empty() {
+            "-".to_string()
+        } else {
+            dns.nameservers.join(" ")
+        }
+    );
+    println!(
+        "  search      {}",
+        if dns.search.is_empty() {
+            "-".to_string()
+        } else {
+            dns.search.join(" ")
+        }
+    );
     println!("  ndots       {}", dns.ndots);
 
     println!("\nlisteners");
@@ -383,8 +409,22 @@ fn run_dns(o: &Opts, name: &str) -> ExitCode {
                 println!("  status      ok");
                 println!("  addresses   {}", addrs.join(", "));
                 println!("  rtt         {:.1} ms", rtt.as_secs_f64() * 1000.0);
-                println!("  nameservers {}", if dns.nameservers.is_empty() { "-".to_string() } else { dns.nameservers.join(" ") });
-                println!("  search      {}", if dns.search.is_empty() { "-".to_string() } else { dns.search.join(" ") });
+                println!(
+                    "  nameservers {}",
+                    if dns.nameservers.is_empty() {
+                        "-".to_string()
+                    } else {
+                        dns.nameservers.join(" ")
+                    }
+                );
+                println!(
+                    "  search      {}",
+                    if dns.search.is_empty() {
+                        "-".to_string()
+                    } else {
+                        dns.search.join(" ")
+                    }
+                );
                 println!("  ndots       {}", dns.ndots);
             }
             ExitCode::SUCCESS
@@ -403,7 +443,14 @@ fn run_dns(o: &Opts, name: &str) -> ExitCode {
                 println!("  status      FAILED");
                 println!("  error       {e}");
                 println!("  rtt         {:.1} ms", rtt.as_secs_f64() * 1000.0);
-                println!("  nameservers {}", if dns.nameservers.is_empty() { "-".to_string() } else { dns.nameservers.join(" ") });
+                println!(
+                    "  nameservers {}",
+                    if dns.nameservers.is_empty() {
+                        "-".to_string()
+                    } else {
+                        dns.nameservers.join(" ")
+                    }
+                );
             }
             ExitCode::from(1)
         }
@@ -474,7 +521,12 @@ fn run_tcp(o: &Opts, target: &str) -> ExitCode {
                 ok_any = true;
                 results.push((*a, true, t0.elapsed().as_millis(), String::new()));
             }
-            Err(e) => results.push((*a, false, t0.elapsed().as_millis(), err_class(&e).to_string())),
+            Err(e) => results.push((
+                *a,
+                false,
+                t0.elapsed().as_millis(),
+                err_class(&e).to_string(),
+            )),
         }
     }
 
@@ -487,7 +539,11 @@ fn run_tcp(o: &Opts, target: &str) -> ExitCode {
                     jstr(&a.to_string()),
                     ok,
                     ms,
-                    if cls.is_empty() { "null".to_string() } else { jstr(cls) }
+                    if cls.is_empty() {
+                        "null".to_string()
+                    } else {
+                        jstr(cls)
+                    }
                 )
             })
             .collect();
@@ -530,7 +586,7 @@ fn parse_url(u: &str) -> Option<Url> {
     if scheme != "http" && scheme != "https" {
         return None;
     }
-    let hostport = rest.split(|c: char| c == '/' || c == '?' || c == '#').next()?;
+    let hostport = rest.split(['/', '?', '#']).next()?;
     if hostport.is_empty() {
         return None;
     }
@@ -538,10 +594,16 @@ fn parse_url(u: &str) -> Option<Url> {
     let default_port = if scheme == "https" { 443 } else { 80 };
     // IPv6 literals must be bracketed: http://[::1]:8080/
     match hostport.rsplit_once(':') {
-        Some((h, p)) if !h.is_empty() => {
-            Some(Url { scheme, host: unbracket(h), port: p.parse().ok()? })
-        }
-        _ => Some(Url { scheme, host: unbracket(hostport), port: default_port }),
+        Some((h, p)) if !h.is_empty() => Some(Url {
+            scheme,
+            host: unbracket(h),
+            port: p.parse().ok()?,
+        }),
+        _ => Some(Url {
+            scheme,
+            host: unbracket(hostport),
+            port: default_port,
+        }),
     }
 }
 
@@ -571,7 +633,10 @@ fn curl_timings(o: &Opts, url: &str) -> Result<CurlRes, String> {
         fmt.into(),
         url.into(),
     ];
-    let out = Command::new("curl").args(&args).output().map_err(|e| format!("curl: {e}"))?;
+    let out = Command::new("curl")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if err.is_empty() {
@@ -619,11 +684,15 @@ fn openssl_x509(host: &str, port: u16, args: &[&str]) -> Option<(bool, String)> 
         .output()
         .ok()?;
     let _ = sc.wait();
-    Some((out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    Some((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    ))
 }
 
 fn cert_field(txt: &str, key: &str) -> Option<String> {
-    txt.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+    txt.lines()
+        .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
 }
 
 fn cert_san(txt: &str) -> Option<String> {
@@ -668,9 +737,11 @@ fn run_http(o: &Opts, url: &str) -> ExitCode {
     let mut expired = None;
     let mut issuer = None;
     if u.scheme == "https" {
-        if let Some((true, txt)) =
-            openssl_x509(&u.host, u.port, &["-subject", "-issuer", "-dates", "-ext", "subjectAltName"])
-        {
+        if let Some((true, txt)) = openssl_x509(
+            &u.host,
+            u.port,
+            &["-subject", "-issuer", "-dates", "-ext", "subjectAltName"],
+        ) {
             not_after = cert_field(&txt, "notAfter=");
             issuer = cert_field(&txt, "issuer=");
             san = cert_san(&txt);
@@ -704,7 +775,15 @@ fn run_http(o: &Opts, url: &str) -> ExitCode {
         );
     } else {
         println!("netpeek http {url}");
-        println!("  status      {} ({})", r.code, if r.code.starts_with('2') { "ok" } else { "not 2xx" });
+        println!(
+            "  status      {} ({})",
+            r.code,
+            if r.code.starts_with('2') {
+                "ok"
+            } else {
+                "not 2xx"
+            }
+        );
         println!("  remote      {}", r.remote);
         println!(
             "  timings     dns {:.1}ms  connect {:.1}ms  tls {:.1}ms  ttfb {:.1}ms  total {:.1}ms",
@@ -744,7 +823,9 @@ const API_HOST: &str = "https://kubernetes.default.svc";
 
 fn api_get(path: &str) -> Result<String, String> {
     let token = fs::read_to_string(format!("{SA_DIR}/token"))
-        .map_err(|_| format!("no service account token at {SA_DIR}/token - not running inside a pod?"))?
+        .map_err(|_| {
+            format!("no service account token at {SA_DIR}/token - not running inside a pod?")
+        })?
         .trim()
         .to_string();
     let args: Vec<String> = vec![
@@ -760,7 +841,10 @@ fn api_get(path: &str) -> Result<String, String> {
         "Accept: application/json".into(),
         format!("{API_HOST}{path}"),
     ];
-    let out = Command::new("curl").args(&args).output().map_err(|e| format!("curl: {e}"))?;
+    let out = Command::new("curl")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
     let body = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
         let msg = serde_json::from_str::<serde_json::Value>(&body)
@@ -778,7 +862,18 @@ struct Backend {
     ready: bool,
 }
 
-fn svc_summary(json: &str) -> Result<(String, Vec<(String, u16, String)>), String> {
+struct SvcRow {
+    ip: String,
+    port: u16,
+    ready: bool,
+    connected: bool,
+    ms: u128,
+    cls: String,
+}
+
+type PortDesc = (String, u16, String);
+
+fn svc_summary(json: &str) -> Result<(String, Vec<PortDesc>), String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let ip = v["spec"]["clusterIP"].as_str().unwrap_or("-").to_string();
     let mut ports = Vec::new();
@@ -814,7 +909,11 @@ fn slice_backends(json: &str) -> Result<Vec<Backend>, String> {
                         for a in addrs {
                             if let Some(ip) = a.as_str() {
                                 for p in &ports {
-                                    out.push(Backend { ip: ip.to_string(), port: *p, ready });
+                                    out.push(Backend {
+                                        ip: ip.to_string(),
+                                        port: *p,
+                                        ready,
+                                    });
                                 }
                             }
                         }
@@ -879,7 +978,11 @@ fn run_svc(o: &Opts, args: &[String]) -> ExitCode {
         Some(v) => v,
         None => {
             let d = read_trim(&format!("{SA_DIR}/namespace"));
-            if d.is_empty() { "default".to_string() } else { d }
+            if d.is_empty() {
+                "default".to_string()
+            } else {
+                d
+            }
         }
     };
 
@@ -900,33 +1003,49 @@ fn run_svc(o: &Opts, args: &[String]) -> ExitCode {
         Err(e) => return svc_fail(o, &name, &ns, &e),
     };
 
-    let mut rows: Vec<(String, u16, bool, bool, u128, String)> = Vec::new();
+    let mut rows: Vec<SvcRow> = Vec::new();
     for b in &backends {
-        let (ok, ms, cls) = probe(&b.ip, b.port, o.timeout);
-        rows.push((b.ip.clone(), b.port, b.ready, ok, ms, cls));
+        let (connected, ms, cls) = probe(&b.ip, b.port, o.timeout);
+        rows.push(SvcRow {
+            ip: b.ip.clone(),
+            port: b.port,
+            ready: b.ready,
+            connected,
+            ms,
+            cls,
+        });
     }
-    let ready: Vec<&(String, u16, bool, bool, u128, String)> = rows.iter().filter(|r| r.2).collect();
-    let all_ok = !ready.is_empty() && ready.iter().all(|r| r.3);
+    let ready_count = rows.iter().filter(|r| r.ready).count();
+    let all_ok = ready_count > 0 && rows.iter().filter(|r| r.ready).all(|r| r.connected);
 
     if o.json {
         let jrows: Vec<String> = rows
             .iter()
-            .map(|(ip, port, rdy, ok, ms, cls)| {
+            .map(|r| {
                 format!(
                     "{{\"ip\":{},\"port\":{},\"ready\":{},\"connected\":{},\"latency_ms\":{},\"error\":{}}}",
-                    jstr(ip),
-                    port,
-                    rdy,
-                    ok,
-                    ms,
-                    if cls.is_empty() { "null".to_string() } else { jstr(cls) }
+                    jstr(&r.ip),
+                    r.port,
+                    r.ready,
+                    r.connected,
+                    r.ms,
+                    if r.cls.is_empty() {
+                        "null".to_string()
+                    } else {
+                        jstr(&r.cls)
+                    }
                 )
             })
             .collect();
         let jports: Vec<String> = ports
             .iter()
             .map(|(n, p, pr)| {
-                format!("{{\"name\":{},\"port\":{},\"protocol\":{}}}", jstr(n), p, jstr(pr))
+                format!(
+                    "{{\"name\":{},\"port\":{},\"protocol\":{}}}",
+                    jstr(n),
+                    p,
+                    jstr(pr)
+                )
             })
             .collect();
         println!(
@@ -941,24 +1060,41 @@ fn run_svc(o: &Opts, args: &[String]) -> ExitCode {
     } else {
         println!("netpeek svc {name} -n {ns}");
         println!("  clusterIP   {cluster_ip}");
-        let pdesc: Vec<String> = ports.iter().map(|(n, p, pr)| {
-            if n.is_empty() { format!("{p}/{pr}") } else { format!("{n}:{p}/{pr}") }
-        }).collect();
-        println!("  ports       {}", if pdesc.is_empty() { "-".to_string() } else { pdesc.join(", ") });
+        let pdesc: Vec<String> = ports
+            .iter()
+            .map(|(n, p, pr)| {
+                if n.is_empty() {
+                    format!("{p}/{pr}")
+                } else {
+                    format!("{n}:{p}/{pr}")
+                }
+            })
+            .collect();
+        println!(
+            "  ports       {}",
+            if pdesc.is_empty() {
+                "-".to_string()
+            } else {
+                pdesc.join(", ")
+            }
+        );
         println!(
             "  endpoints   {} ready, {} not-ready",
-            rows.iter().filter(|r| r.2).count(),
-            rows.iter().filter(|r| !r.2).count()
+            ready_count,
+            rows.iter().filter(|r| !r.ready).count()
         );
         if rows.is_empty() {
             println!("  no endpoints - selector matches nothing, or the slice RBAC is missing");
         }
-        for (ip, port, rdy, ok, ms, cls) in &rows {
-            let state = if *rdy { "ready  " } else { "not-rdy" };
-            if *ok {
-                println!("  {ip}:{port}  {state}  connected in {ms} ms");
+        for r in &rows {
+            let state = if r.ready { "ready  " } else { "not-rdy" };
+            if r.connected {
+                println!("  {}:{}  {state}  connected in {} ms", r.ip, r.port, r.ms);
             } else {
-                println!("  {ip}:{port}  {state}  FAILED ({cls}) after {ms} ms");
+                println!(
+                    "  {}:{}  {state}  FAILED ({}) after {} ms",
+                    r.ip, r.port, r.cls, r.ms
+                );
             }
         }
     }
@@ -1037,13 +1173,19 @@ mod tests {
             "# comment\nnameserver 10.96.0.10\nnameserver 1.1.1.1\nsearch default.svc.cluster.local svc.cluster.local\noptions ndots:5 timeout:2\n",
         );
         assert_eq!(c.nameservers, vec!["10.96.0.10", "1.1.1.1"]);
-        assert_eq!(c.search, vec!["default.svc.cluster.local", "svc.cluster.local"]);
+        assert_eq!(
+            c.search,
+            vec!["default.svc.cluster.local", "svc.cluster.local"]
+        );
         assert_eq!(c.ndots, "5");
     }
 
     #[test]
     fn target_split() {
-        assert_eq!(split_target("10.96.0.1:443"), Some(("10.96.0.1".into(), 443)));
+        assert_eq!(
+            split_target("10.96.0.1:443"),
+            Some(("10.96.0.1".into(), 443))
+        );
         assert_eq!(split_target("[::1]:8080"), Some(("::1".into(), 8080)));
         assert_eq!(split_target("host"), None);
         assert_eq!(split_target("host:0"), None);
@@ -1068,9 +1210,15 @@ mod tests {
     #[test]
     fn iface_lines_parsed() {
         let lo = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever";
-        assert_eq!(iface_line(lo), Some(("lo".into(), Some("127.0.0.1/8".into()))));
+        assert_eq!(
+            iface_line(lo),
+            Some(("lo".into(), Some("127.0.0.1/8".into())))
+        );
         let eth = "2: eth0    inet 172.17.0.3/16 brd 172.17.255.255 scope global eth0\\       valid_lft forever preferred_lft forever";
-        assert_eq!(iface_line(eth), Some(("eth0".into(), Some("172.17.0.3/16".into()))));
+        assert_eq!(
+            iface_line(eth),
+            Some(("eth0".into(), Some("172.17.0.3/16".into())))
+        );
         let v6 = "1: lo    inet6 ::1/128 scope host proto kernel_lo \\       valid_lft forever preferred_lft forever";
         assert_eq!(iface_line(v6), Some(("lo".into(), Some("::1/128".into()))));
         assert_eq!(iface_line(""), None);
@@ -1081,7 +1229,10 @@ mod tests {
         let hdr = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
         assert_eq!(listen_line(hdr, false), None);
         let listen = "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1";
-        assert_eq!(listen_line(listen, false), Some("tcp  0.0.0.0:8080".to_string()));
+        assert_eq!(
+            listen_line(listen, false),
+            Some("tcp  0.0.0.0:8080".to_string())
+        );
         let established = "   1: 0100007F:0016 0100007F:D431 01 00000000:00000000 00:00000000 00000000     0        0 12346 1";
         assert_eq!(listen_line(established, false), None);
     }
@@ -1089,7 +1240,10 @@ mod tests {
     #[test]
     fn url_parsed() {
         let u = parse_url("https://kubernetes.default.svc/healthz").unwrap();
-        assert_eq!((u.scheme.as_str(), u.host.as_str(), u.port), ("https", "kubernetes.default.svc", 443));
+        assert_eq!(
+            (u.scheme.as_str(), u.host.as_str(), u.port),
+            ("https", "kubernetes.default.svc", 443)
+        );
         let u = parse_url("http://10.96.0.1:8080/x?y=1").unwrap();
         assert_eq!((u.host.as_str(), u.port), ("10.96.0.1", 8080));
         let u = parse_url("https://[::1]:8443/").unwrap();
@@ -1121,15 +1275,27 @@ mod tests {
             {"ports":[{"port":8080}],"endpoints":[{"addresses":["10.244.1.5"],"conditions":{"ready":true}}]}]}"#;
         let b = slice_backends(j).unwrap();
         assert_eq!(b.len(), 2);
-        assert_eq!((b[0].ip.as_str(), b[0].port, b[0].ready), ("10.244.1.5", 8080, true));
-        assert_eq!((b[1].ip.as_str(), b[1].port, b[1].ready), ("10.244.2.7", 8080, false));
+        assert_eq!(
+            (b[0].ip.as_str(), b[0].port, b[0].ready),
+            ("10.244.1.5", 8080, true)
+        );
+        assert_eq!(
+            (b[1].ip.as_str(), b[1].port, b[1].ready),
+            ("10.244.2.7", 8080, false)
+        );
     }
 
     #[test]
     fn cert_fields_parsed() {
         let t = "subject=CN = kubernetes\nissuer=CN = kubernetes\nnotBefore=Oct 28 06:00:00 2026 GMT\nnotAfter=Oct 28 06:00:00 2027 GMT\nX509v3 Subject Alternative Name: \n    DNS:kubernetes, DNS:kubernetes.default\n";
-        assert_eq!(cert_field(t, "notAfter=").as_deref(), Some("Oct 28 06:00:00 2027 GMT"));
-        assert_eq!(cert_san(t).as_deref(), Some("DNS:kubernetes, DNS:kubernetes.default"));
+        assert_eq!(
+            cert_field(t, "notAfter=").as_deref(),
+            Some("Oct 28 06:00:00 2027 GMT")
+        );
+        assert_eq!(
+            cert_san(t).as_deref(),
+            Some("DNS:kubernetes, DNS:kubernetes.default")
+        );
         assert_eq!(cert_field(t, "notThere="), None);
     }
 }

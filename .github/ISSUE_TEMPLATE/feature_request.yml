@@ -1,0 +1,28 @@
+name: Feature request
+description: A diagnostic question NetPeek should answer
+labels: [enhancement]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: What question should netpeek answer?
+      description: Describe the question you are trying to answer during an incident, not the implementation you have in mind.
+      placeholder: Which backend of this Service is not accepting connections, and is the pod ready or not?
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you answer it today?
+      description: The commands you run now — this also tells us what not to duplicate.
+      render: shell
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: What does it need?
+      options:
+        - label: Kubernetes API access (RBAC)
+        - label: Extra capabilities (NET_RAW / NET_ADMIN)
+        - label: Nothing beyond the pod network namespace

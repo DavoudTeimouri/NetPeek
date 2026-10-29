@@ -1,5 +1,10 @@
 # NetPeek
 
+[![ci](https://github.com/DavoudTeimouri/NetPeek/actions/workflows/ci.yml/badge.svg)](https://github.com/DavoudTeimouri/NetPeek/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
+[![image](https://img.shields.io/badge/ghcr.io-netpeek-blueviolet.svg)](https://github.com/DavoudTeimouri/NetPeek/pkgs/container/netpeek)
+
 Kubernetes network diagnostics container + CLI.
 
 `netshoot` hands you the tools. NetPeek hands you answers: one command that
@@ -120,10 +125,21 @@ Roadmap:
 ## Development
 
 ```bash
-cargo test          # assert-based checks, no test framework
+cargo test                     # assert-based checks, no test framework
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 cargo build --release
 docker build -t netpeek .
 ```
 
-Zero runtime dependencies: stdlib Rust, single static binary. Interface detail
-comes from `iproute2` (`ip -o addr show`), which the image bundles.
+Single static binary from a Rust workspace with one dependency (`serde_json`,
+for Kubernetes API bodies). Everything else is stdlib or a tool the image
+already ships: interface detail comes from `iproute2` (`ip -o addr show`), HTTP
+timings from `curl`, certificate detail from `openssl`.
+
+## Project
+
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [Security policy](SECURITY.md)
+- [Issues](https://github.com/DavoudTeimouri/NetPeek/issues) · [Discussions](https://github.com/DavoudTeimouri/NetPeek/discussions)
