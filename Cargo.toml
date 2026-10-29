@@ -1,0 +1,16 @@
+[package]
+name = "netpeek"
+version = "0.1.0"
+edition = "2021"
+description = "Kubernetes network diagnostics container and CLI"
+license = "MIT"
+
+[[bin]]
+name = "netpeek"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
