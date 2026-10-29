@@ -7,7 +7,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked && install -m 0755 target/release/netpeek /netpeek
 
-FROM alpine:3.20
+FROM alpine:3.24
 
 LABEL org.opencontainers.image.title="netpeek" \
       org.opencontainers.image.description="Kubernetes network diagnostics: netns snapshot, DNS, TCP checks plus the usual net tools" \
