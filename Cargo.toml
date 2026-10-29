@@ -1,9 +1,14 @@
 [package]
 name = "netpeek"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Kubernetes network diagnostics container and CLI"
 license = "MIT"
+
+[dependencies]
+# ponytail: one dep, only for parsing Kubernetes API JSON. Hand-rolled JSON
+# parsing of untrusted API bodies is the wrong kind of clever.
+serde_json = "1"
 
 [[bin]]
 name = "netpeek"

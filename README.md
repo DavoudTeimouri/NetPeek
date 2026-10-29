@@ -44,6 +44,8 @@ docker run --rm ghcr.io/davoudteimouri/netpeek:latest netpeek info --json
 | `netpeek info` | interfaces, MTU, link state, routes, `/etc/resolv.conf`, listening TCP sockets — the whole netns in one screen |
 | `netpeek dns <name>` | does the name resolve, to what addresses, how fast, through which resolver and search domains |
 | `netpeek tcp <host:port>` | does the socket accept, latency, and failure class (`refused`, `timeout`, `network-unreachable`, `host-unreachable`) |
+| `netpeek http <url>` | HTTP status, DNS/connect/TLS/TTFB breakdown, TLS issuer, cert expiry and SANs |
+| `netpeek svc <name> [-n ns]` | Service → ClusterIP → endpoint slices → TCP probe of every backend, ready and not-ready |
 
 Flags: `--json` (machine output), `--timeout <secs>` (TCP connect timeout, default 5), `-v`.
 
@@ -87,18 +89,31 @@ kubectl run netpeek --rm -it --restart=Never \
   --overrides='{"spec":{"containers":[{"name":"netpeek","image":"ghcr.io/davoudteimouri/netpeek:latest","stdin":true,"tty":true,"securityContext":{"capabilities":{"add":["NET_RAW","NET_ADMIN"]}}}]}}'
 ```
 
+## RBAC for `netpeek svc`
+
+`info`, `dns`, `tcp` and `http` need no cluster access at all — they still work
+when the control plane is the broken part. `svc` talks to the API server using
+the pod's service account and needs:
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+```
+
 ## Status
 
-v0.1 — `info`, `dns`, `tcp`, `--json`. No Kubernetes API access yet, so it runs
-with zero RBAC and works even when the control plane is the thing that is broken.
+v0.2 — `info`, `dns`, `tcp`, `http`, `svc`, `--json`.
 
 Roadmap:
 
 | version | feature | notes |
 | --- | --- | --- |
-| v0.2 | `netpeek svc <name> -n <ns>` | Service → ClusterIP → EndpointSlices → per-backend TCP probe. Needs `get/list` on `services` and `endpointslices`. |
-| v0.2 | `netpeek http <url>` | TLS chain, cert SAN + expiry, timing breakdown |
-| v0.2 | `netpeek mtu <target>` | path MTU / PMTU blackhole detection |
+| v0.3 | `netpeek mtu <target>` | path MTU / PMTU blackhole detection |
 | v0.3 | `netpeek netpol` | rule simulation only — cannot prove enforcement without real traffic |
 | v0.3 | eBPF trace | tcpconnect/retransmits, needs `NET_ADMIN` + kernel BTF |
 

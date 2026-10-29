@@ -5,7 +5,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,6 +20,8 @@ COMMANDS
   info               netns snapshot: interfaces, routes, DNS config, listeners
   dns <name>         resolve a name via the system resolver, report addrs + rtt
   tcp <host:port>    TCP connect test, report latency or error class
+  http <url>         HTTP(S) request: status, timings, TLS chain and cert expiry
+  svc <name> [-n ns] Service -> ClusterIP -> endpoint slices -> per-backend probe
   help               this text
   version            version string
 
@@ -79,6 +81,21 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "http" => match rest.get(1) {
+            Some(u) => run_http(&opts, u),
+            None => {
+                eprintln!("netpeek: http needs a url, e.g. netpeek http https://kubernetes.default.svc/healthz");
+                ExitCode::from(2)
+            }
+        },
+        "svc" => {
+            if rest.len() < 2 {
+                eprintln!("netpeek: svc needs a service name, e.g. netpeek svc kubernetes -n default");
+                ExitCode::from(2)
+            } else {
+                run_svc(&opts, &rest[1..])
+            }
+        }
         other => {
             eprintln!("netpeek: unknown command '{other}'\n\n{USAGE}");
             ExitCode::from(2)
@@ -499,6 +516,483 @@ fn run_tcp(o: &Opts, target: &str) -> ExitCode {
     }
 }
 
+// ---------- http ----------
+
+struct Url {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+fn parse_url(u: &str) -> Option<Url> {
+    let (scheme, rest) = u.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let hostport = rest.split(|c: char| c == '/' || c == '?' || c == '#').next()?;
+    if hostport.is_empty() {
+        return None;
+    }
+    let unbracket = |s: &str| s.trim_start_matches('[').trim_end_matches(']').to_string();
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    // IPv6 literals must be bracketed: http://[::1]:8080/
+    match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => {
+            Some(Url { scheme, host: unbracket(h), port: p.parse().ok()? })
+        }
+        _ => Some(Url { scheme, host: unbracket(hostport), port: default_port }),
+    }
+}
+
+struct CurlRes {
+    code: String,
+    remote: String,
+    dns_ms: f64,
+    connect_ms: f64,
+    tls_ms: f64,
+    ttfb_ms: f64,
+    total_ms: f64,
+}
+
+fn s2ms(s: &str) -> f64 {
+    s.parse::<f64>().unwrap_or(0.0) * 1000.0
+}
+
+fn curl_timings(o: &Opts, url: &str) -> Result<CurlRes, String> {
+    let fmt = "%{http_code}|%{remote_ip}|%{time_namelookup}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}";
+    let args: Vec<String> = vec![
+        "-sS".into(),
+        "-o".into(),
+        "/dev/null".into(),
+        "--max-time".into(),
+        o.timeout.as_secs().to_string(),
+        "-w".into(),
+        fmt.into(),
+        url.into(),
+    ];
+    let out = Command::new("curl").args(&args).output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("curl exit {:?}", out.status.code())
+        } else {
+            err
+        });
+    }
+    let body = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let f: Vec<&str> = body.split('|').collect();
+    if f.len() < 7 {
+        return Err(format!("unexpected curl output: {body}"));
+    }
+    Ok(CurlRes {
+        code: f[0].to_string(),
+        remote: f[1].to_string(),
+        dns_ms: s2ms(f[2]),
+        connect_ms: s2ms(f[3]),
+        tls_ms: s2ms(f[4]),
+        ttfb_ms: s2ms(f[5]),
+        total_ms: s2ms(f[6]),
+    })
+}
+
+fn openssl_x509(host: &str, port: u16, args: &[&str]) -> Option<(bool, String)> {
+    let sargs: Vec<String> = vec![
+        "s_client".into(),
+        "-servername".into(),
+        host.into(),
+        "-connect".into(),
+        format!("{host}:{port}"),
+    ];
+    let mut sc = Command::new("openssl")
+        .args(&sargs)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let out = Command::new("openssl")
+        .arg("x509")
+        .arg("-noout")
+        .args(args)
+        .stdin(Stdio::from(sc.stdout.take()?))
+        .output()
+        .ok()?;
+    let _ = sc.wait();
+    Some((out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string()))
+}
+
+fn cert_field(txt: &str, key: &str) -> Option<String> {
+    txt.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+}
+
+fn cert_san(txt: &str) -> Option<String> {
+    let mut it = txt.lines();
+    while let Some(l) = it.next() {
+        if l.contains("Subject Alternative Name") {
+            return it.next().map(|s| s.trim().to_string());
+        }
+    }
+    None
+}
+
+fn run_http(o: &Opts, url: &str) -> ExitCode {
+    let u = match parse_url(url) {
+        Some(v) => v,
+        None => {
+            eprintln!("netpeek: bad url '{url}', want http(s)://host[:port][/path]");
+            return ExitCode::from(2);
+        }
+    };
+
+    let r = match curl_timings(o, url) {
+        Ok(v) => v,
+        Err(e) => {
+            if o.json {
+                println!(
+                    "{{\"command\":\"http\",\"url\":{},\"ok\":false,\"error\":{}}}",
+                    jstr(url),
+                    jstr(&e)
+                );
+            } else {
+                println!("netpeek http {url}");
+                println!("  status      FAILED");
+                println!("  error       {e}");
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut not_after = None;
+    let mut san = None;
+    let mut expired = None;
+    let mut issuer = None;
+    if u.scheme == "https" {
+        if let Some((true, txt)) =
+            openssl_x509(&u.host, u.port, &["-subject", "-issuer", "-dates", "-ext", "subjectAltName"])
+        {
+            not_after = cert_field(&txt, "notAfter=");
+            issuer = cert_field(&txt, "issuer=");
+            san = cert_san(&txt);
+        }
+        expired = openssl_x509(&u.host, u.port, &["-checkend", "0"]).and_then(|(_, t)| {
+            if t.contains("will not expire") {
+                Some(false)
+            } else if t.contains("will expire") {
+                Some(true)
+            } else {
+                None
+            }
+        });
+    }
+
+    if o.json {
+        println!(
+            "{{\"command\":\"http\",\"url\":{},\"ok\":true,\"status\":{},\"remote\":{},\"timings_ms\":{{\"dns\":{:.3},\"connect\":{:.3},\"tls\":{:.3},\"ttfb\":{:.3},\"total\":{:.3}}},\"tls\":{{\"not_after\":{},\"expired\":{},\"issuer\":{},\"san\":{}}}}}",
+            jstr(url),
+            jstr(&r.code),
+            jstr(&r.remote),
+            r.dns_ms,
+            r.connect_ms,
+            r.tls_ms,
+            r.ttfb_ms,
+            r.total_ms,
+            opt_json(&not_after),
+            expired.map(|b| b.to_string()).unwrap_or_else(|| "null".into()),
+            opt_json(&issuer),
+            opt_json(&san)
+        );
+    } else {
+        println!("netpeek http {url}");
+        println!("  status      {} ({})", r.code, if r.code.starts_with('2') { "ok" } else { "not 2xx" });
+        println!("  remote      {}", r.remote);
+        println!(
+            "  timings     dns {:.1}ms  connect {:.1}ms  tls {:.1}ms  ttfb {:.1}ms  total {:.1}ms",
+            r.dns_ms, r.connect_ms, r.tls_ms, r.ttfb_ms, r.total_ms
+        );
+        if u.scheme == "https" {
+            if let Some(na) = &not_after {
+                println!(
+                    "  cert        expires {na}{}",
+                    match expired {
+                        Some(true) => "  EXPIRED",
+                        Some(false) => "",
+                        None => "",
+                    }
+                );
+            }
+            if let Some(i) = &issuer {
+                println!("  issuer      {i}");
+            }
+            if let Some(s) = &san {
+                println!("  san         {s}");
+            }
+        }
+    }
+
+    if r.code.starts_with('2') || r.code.starts_with('3') {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+// ---------- svc ----------
+
+const SA_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
+const API_HOST: &str = "https://kubernetes.default.svc";
+
+fn api_get(path: &str) -> Result<String, String> {
+    let token = fs::read_to_string(format!("{SA_DIR}/token"))
+        .map_err(|_| format!("no service account token at {SA_DIR}/token - not running inside a pod?"))?
+        .trim()
+        .to_string();
+    let args: Vec<String> = vec![
+        "-sS".into(),
+        "--fail-with-body".into(),
+        "--max-time".into(),
+        "10".into(),
+        "--cacert".into(),
+        format!("{SA_DIR}/ca.crt"),
+        "-H".into(),
+        format!("Authorization: Bearer {token}"),
+        "-H".into(),
+        "Accept: application/json".into(),
+        format!("{API_HOST}{path}"),
+    ];
+    let out = Command::new("curl").args(&args).output().map_err(|e| format!("curl: {e}"))?;
+    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() {
+        let msg = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| body.trim().chars().take(200).collect());
+        return Err(format!("GET {path}: {msg}"));
+    }
+    Ok(body)
+}
+
+struct Backend {
+    ip: String,
+    port: u16,
+    ready: bool,
+}
+
+fn svc_summary(json: &str) -> Result<(String, Vec<(String, u16, String)>), String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let ip = v["spec"]["clusterIP"].as_str().unwrap_or("-").to_string();
+    let mut ports = Vec::new();
+    if let Some(arr) = v["spec"]["ports"].as_array() {
+        for p in arr {
+            ports.push((
+                p["name"].as_str().unwrap_or("").to_string(),
+                p["port"].as_u64().unwrap_or(0) as u16,
+                p["protocol"].as_str().unwrap_or("TCP").to_string(),
+            ));
+        }
+    }
+    Ok((ip, ports))
+}
+
+fn slice_backends(json: &str) -> Result<Vec<Backend>, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    if let Some(items) = v["items"].as_array() {
+        for it in items {
+            let mut ports: Vec<u16> = Vec::new();
+            if let Some(ps) = it["ports"].as_array() {
+                for p in ps {
+                    if let Some(n) = p["port"].as_u64() {
+                        ports.push(n as u16);
+                    }
+                }
+            }
+            if let Some(eps) = it["endpoints"].as_array() {
+                for ep in eps {
+                    let ready = ep["conditions"]["ready"].as_bool().unwrap_or(false);
+                    if let Some(addrs) = ep["addresses"].as_array() {
+                        for a in addrs {
+                            if let Some(ip) = a.as_str() {
+                                for p in &ports {
+                                    out.push(Backend { ip: ip.to_string(), port: *p, ready });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| (a.ip.as_str(), a.port).cmp(&(b.ip.as_str(), b.port)));
+    out.dedup_by(|a, b| a.ip == b.ip && a.port == b.port);
+    Ok(out)
+}
+
+fn probe(ip: &str, port: u16, timeout: Duration) -> (bool, u128, String) {
+    let addr = match format!("{ip}:{port}").parse::<SocketAddr>() {
+        Ok(a) => a,
+        Err(_) => return (false, 0, "bad-addr".to_string()),
+    };
+    let t0 = Instant::now();
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => (true, t0.elapsed().as_millis(), String::new()),
+        Err(e) => (false, t0.elapsed().as_millis(), err_class(&e).to_string()),
+    }
+}
+
+fn run_svc(o: &Opts, args: &[String]) -> ExitCode {
+    let mut name: Option<String> = None;
+    let mut ns: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-n" | "--namespace" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => ns = Some(v.clone()),
+                    None => {
+                        eprintln!("netpeek: -n needs a namespace");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            a if a.starts_with('-') => {
+                eprintln!("netpeek: unknown flag {a}");
+                return ExitCode::from(2);
+            }
+            a => {
+                if name.is_none() {
+                    name = Some(a.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    let name = match name {
+        Some(v) => v,
+        None => {
+            eprintln!("netpeek: svc needs a name");
+            return ExitCode::from(2);
+        }
+    };
+    let ns = match ns {
+        Some(v) => v,
+        None => {
+            let d = read_trim(&format!("{SA_DIR}/namespace"));
+            if d.is_empty() { "default".to_string() } else { d }
+        }
+    };
+
+    let svc_json = match api_get(&format!("/api/v1/namespaces/{ns}/services/{name}")) {
+        Ok(v) => v,
+        Err(e) => return svc_fail(o, &name, &ns, &e),
+    };
+    let (cluster_ip, ports) = match svc_summary(&svc_json) {
+        Ok(v) => v,
+        Err(e) => return svc_fail(o, &name, &ns, &format!("bad service JSON: {e}")),
+    };
+
+    let slice_path = format!(
+        "/apis/discovery.k8s.io/v1/namespaces/{ns}/endpointslices?labelSelector=kubernetes.io/service-name%3D{name}"
+    );
+    let backends = match api_get(&slice_path).and_then(|j| slice_backends(&j)) {
+        Ok(v) => v,
+        Err(e) => return svc_fail(o, &name, &ns, &e),
+    };
+
+    let mut rows: Vec<(String, u16, bool, bool, u128, String)> = Vec::new();
+    for b in &backends {
+        let (ok, ms, cls) = probe(&b.ip, b.port, o.timeout);
+        rows.push((b.ip.clone(), b.port, b.ready, ok, ms, cls));
+    }
+    let ready: Vec<&(String, u16, bool, bool, u128, String)> = rows.iter().filter(|r| r.2).collect();
+    let all_ok = !ready.is_empty() && ready.iter().all(|r| r.3);
+
+    if o.json {
+        let jrows: Vec<String> = rows
+            .iter()
+            .map(|(ip, port, rdy, ok, ms, cls)| {
+                format!(
+                    "{{\"ip\":{},\"port\":{},\"ready\":{},\"connected\":{},\"latency_ms\":{},\"error\":{}}}",
+                    jstr(ip),
+                    port,
+                    rdy,
+                    ok,
+                    ms,
+                    if cls.is_empty() { "null".to_string() } else { jstr(cls) }
+                )
+            })
+            .collect();
+        let jports: Vec<String> = ports
+            .iter()
+            .map(|(n, p, pr)| {
+                format!("{{\"name\":{},\"port\":{},\"protocol\":{}}}", jstr(n), p, jstr(pr))
+            })
+            .collect();
+        println!(
+            "{{\"command\":\"svc\",\"name\":{},\"namespace\":{},\"cluster_ip\":{},\"ports\":[{}],\"endpoints\":[{}],\"ok\":{}}}",
+            jstr(&name),
+            jstr(&ns),
+            jstr(&cluster_ip),
+            jports.join(","),
+            jrows.join(","),
+            all_ok
+        );
+    } else {
+        println!("netpeek svc {name} -n {ns}");
+        println!("  clusterIP   {cluster_ip}");
+        let pdesc: Vec<String> = ports.iter().map(|(n, p, pr)| {
+            if n.is_empty() { format!("{p}/{pr}") } else { format!("{n}:{p}/{pr}") }
+        }).collect();
+        println!("  ports       {}", if pdesc.is_empty() { "-".to_string() } else { pdesc.join(", ") });
+        println!(
+            "  endpoints   {} ready, {} not-ready",
+            rows.iter().filter(|r| r.2).count(),
+            rows.iter().filter(|r| !r.2).count()
+        );
+        if rows.is_empty() {
+            println!("  no endpoints - selector matches nothing, or the slice RBAC is missing");
+        }
+        for (ip, port, rdy, ok, ms, cls) in &rows {
+            let state = if *rdy { "ready  " } else { "not-rdy" };
+            if *ok {
+                println!("  {ip}:{port}  {state}  connected in {ms} ms");
+            } else {
+                println!("  {ip}:{port}  {state}  FAILED ({cls}) after {ms} ms");
+            }
+        }
+    }
+
+    if all_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn svc_fail(o: &Opts, name: &str, ns: &str, err: &str) -> ExitCode {
+    if o.json {
+        println!(
+            "{{\"command\":\"svc\",\"name\":{},\"namespace\":{},\"ok\":false,\"error\":{}}}",
+            jstr(name),
+            jstr(ns),
+            jstr(err)
+        );
+    } else {
+        println!("netpeek svc {name} -n {ns}");
+        println!("  status      FAILED");
+        println!("  error       {err}");
+    }
+    ExitCode::from(1)
+}
+
+fn opt_json(v: &Option<String>) -> String {
+    match v {
+        Some(s) => jstr(s),
+        None => "null".to_string(),
+    }
+}
+
 // ---------- json ----------
 
 fn esc(s: &str) -> String {
@@ -590,5 +1084,52 @@ mod tests {
         assert_eq!(listen_line(listen, false), Some("tcp  0.0.0.0:8080".to_string()));
         let established = "   1: 0100007F:0016 0100007F:D431 01 00000000:00000000 00:00000000 00000000     0        0 12346 1";
         assert_eq!(listen_line(established, false), None);
+    }
+
+    #[test]
+    fn url_parsed() {
+        let u = parse_url("https://kubernetes.default.svc/healthz").unwrap();
+        assert_eq!((u.scheme.as_str(), u.host.as_str(), u.port), ("https", "kubernetes.default.svc", 443));
+        let u = parse_url("http://10.96.0.1:8080/x?y=1").unwrap();
+        assert_eq!((u.host.as_str(), u.port), ("10.96.0.1", 8080));
+        let u = parse_url("https://[::1]:8443/").unwrap();
+        assert_eq!((u.host.as_str(), u.port), ("::1", 8443));
+        assert!(parse_url("ftp://x/").is_none());
+        assert!(parse_url("no-scheme").is_none());
+    }
+
+    #[test]
+    fn svc_json_parsed() {
+        let j = r#"{"spec":{"clusterIP":"10.96.14.7","ports":[{"name":"http","port":80,"protocol":"TCP"},{"port":9090,"protocol":"TCP"}]}}"#;
+        let (ip, ports) = svc_summary(j).unwrap();
+        assert_eq!(ip, "10.96.14.7");
+        assert_eq!(
+            ports,
+            vec![
+                ("http".to_string(), 80u16, "TCP".to_string()),
+                (String::new(), 9090u16, "TCP".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn slices_parsed_and_deduped() {
+        let j = r#"{"items":[
+            {"ports":[{"port":8080}],"endpoints":[
+                {"addresses":["10.244.1.5"],"conditions":{"ready":true}},
+                {"addresses":["10.244.2.7"],"conditions":{"ready":false}}]},
+            {"ports":[{"port":8080}],"endpoints":[{"addresses":["10.244.1.5"],"conditions":{"ready":true}}]}]}"#;
+        let b = slice_backends(j).unwrap();
+        assert_eq!(b.len(), 2);
+        assert_eq!((b[0].ip.as_str(), b[0].port, b[0].ready), ("10.244.1.5", 8080, true));
+        assert_eq!((b[1].ip.as_str(), b[1].port, b[1].ready), ("10.244.2.7", 8080, false));
+    }
+
+    #[test]
+    fn cert_fields_parsed() {
+        let t = "subject=CN = kubernetes\nissuer=CN = kubernetes\nnotBefore=Oct 28 06:00:00 2026 GMT\nnotAfter=Oct 28 06:00:00 2027 GMT\nX509v3 Subject Alternative Name: \n    DNS:kubernetes, DNS:kubernetes.default\n";
+        assert_eq!(cert_field(t, "notAfter=").as_deref(), Some("Oct 28 06:00:00 2027 GMT"));
+        assert_eq!(cert_san(t).as_deref(), Some("DNS:kubernetes, DNS:kubernetes.default"));
+        assert_eq!(cert_field(t, "notThere="), None);
     }
 }
