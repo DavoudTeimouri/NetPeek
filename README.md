@@ -50,6 +50,7 @@ docker run --rm ghcr.io/davoudteimouri/netpeek:latest netpeek info --json
 | `netpeek dns <name>` | does the name resolve, to what addresses, how fast, through which resolver and search domains |
 | `netpeek tcp <host:port>` | does the socket accept, latency, and failure class (`refused`, `timeout`, `network-unreachable`, `host-unreachable`) |
 | `netpeek http <url>` | HTTP status, DNS/connect/TLS/TTFB breakdown, TLS issuer, cert expiry and SANs |
+| `netpeek mtu <target>` | Path MTU / PMTU blackhole via DF-bit ping sweep + tracepath; flags bottleneck vs local MTU |
 | `netpeek svc <name> [-n ns]` | Service → ClusterIP → endpoint slices → TCP probe of every backend, ready and not-ready |
 
 Flags: `--json` (machine output), `--timeout <secs>` (TCP connect timeout, default 5), `-v`.
@@ -118,9 +119,12 @@ Roadmap:
 
 | version | feature | notes |
 | --- | --- | --- |
-| v0.3 | `netpeek mtu <target>` | path MTU / PMTU blackhole detection |
-| v0.3 | `netpeek netpol` | rule simulation only — cannot prove enforcement without real traffic |
-| v0.3 | eBPF trace | tcpconnect/retransmits, needs `NET_ADMIN` + kernel BTF |
+| v0.3 | `netpeek conntrack` | conntrack utilization + drops from `/proc`, pure stdlib |
+| v0.3 | `netpeek dnsdiag` | per-search-domain RTT + ndots impact |
+| v0.3 | `netpeek netpol` | real TCP probe from src pod netns (not simulation) |
+| v0.3 | `netpeek sidecar` | Istio/Linkerd/Cilium sidecar health |
+| v0.3 | `netpeek endpoints` | EndpointSlice freshness/drift (extends `svc`) |
+| v0.3 | eBPF trace | tcpconnect/retransmits/drops, `NET_ADMIN` + kernel BTF, Aya |
 
 ## Development
 

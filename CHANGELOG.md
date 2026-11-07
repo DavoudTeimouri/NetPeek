@@ -7,6 +7,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `netpeek mtu <target>`: path MTU / PMTU blackhole detection via DF-bit ping
+  binary search + `tracepath`. Reports local MTU, path MTU, max payload, and
+  bottleneck flag. Zero new dependencies (`iproute2`, `iputils` already in
+  image).
+
 ## [0.2.0] - 2026-10-29
 
 ### Added

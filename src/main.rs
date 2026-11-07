@@ -88,6 +88,13 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "mtu" => match rest.get(1) {
+            Some(t) => run_mtu(&opts, t),
+            None => {
+                eprintln!("netpeek: mtu needs a target, e.g. netpeek mtu 10.244.2.7");
+                ExitCode::from(2)
+            }
+        },
         "svc" => {
             if rest.len() < 2 {
                 eprintln!(
@@ -816,6 +823,138 @@ fn run_http(o: &Opts, url: &str) -> ExitCode {
     }
 }
 
+// ---------- mtu ----------
+
+fn default_iface() -> Option<String> {
+    let out = ip_cmd(&["-o", "route", "show", "default"])?;
+    let line = out.lines().next()?;
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    let pos = toks.iter().position(|t| *t == "dev")?;
+    Some(toks.get(pos + 1)?.to_string())
+}
+
+fn local_mtu(iface: &str) -> Option<u16> {
+    fs::read_to_string(format!("/sys/class/net/{iface}/mtu"))
+        .ok()?
+        .trim()
+        .parse::<u16>()
+        .ok()
+}
+
+fn ping_df(target: &str, payload: u16, timeout: Duration) -> bool {
+    let secs = timeout.as_secs().max(1);
+    Command::new("ping")
+        .arg("-c")
+        .arg("1")
+        .arg("-M")
+        .arg("do")
+        .arg("-s")
+        .arg(payload.to_string())
+        .arg("-W")
+        .arg(secs.to_string())
+        .arg(target)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn tracepath_mtu(target: &str) -> Option<u16> {
+    let out = Command::new("tracepath").arg(target).output().ok()?;
+    let txt = String::from_utf8_lossy(&out.stdout);
+    parse_tracepath_mtu(&txt)
+}
+
+fn parse_tracepath_mtu(txt: &str) -> Option<u16> {
+    for line in txt.lines() {
+        if let Some(idx) = line.find("pmtu ") {
+            let rest = &line[idx + 5..];
+            let num: u16 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(num);
+        }
+    }
+    None
+}
+
+fn ping_max_payload(target: &str, lo: u16, hi: u16, timeout: Duration) -> u16 {
+    let mut lo = lo;
+    let mut hi = hi;
+    let mut best = lo;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        if ping_df(target, mid, timeout) {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
+        }
+    }
+    best
+}
+
+fn run_mtu(o: &Opts, target: &str) -> ExitCode {
+    let host = target.split(':').next().unwrap_or(target);
+    if host.is_empty() {
+        eprintln!("netpeek: mtu needs a target, e.g. netpeek mtu 10.244.2.7");
+        return ExitCode::from(2);
+    }
+
+    let iface = default_iface().unwrap_or_else(|| "eth0".to_string());
+    let local = local_mtu(&iface).unwrap_or(1500);
+
+    let trace = tracepath_mtu(host);
+
+    // max payload that fits without DF fragmentation
+    let hi = local.saturating_sub(28);
+    let best_payload = ping_max_payload(host, 64, hi, o.timeout);
+    let path_mtu = best_payload.saturating_add(28);
+
+    // ICMP unreachable check: a packet surely too large should yield
+    // Type 3 Code 4 ("frag needed") unless ICMP is blackholed.
+    let probe = best_payload.saturating_add(1200);
+    let too_big_fails = !ping_df(host, probe, o.timeout);
+
+    let bottleneck = trace.is_some_and(|t| t < local) || (trace.is_none() && path_mtu < local);
+
+    if o.json {
+        println!(
+            "{{\"command\":\"mtu\",\"target\":{},\"iface\":{},\"local_mtu\":{},\"path_mtu\":{},\"tracepath_mtu\":{},\"max_payload\":{},\"icmp_feedback\":{},\"bottleneck\":{}}}",
+            jstr(host),
+            jstr(&iface),
+            local,
+            path_mtu,
+            opt_json(&trace.map(|t| t.to_string())),
+            best_payload,
+            too_big_fails,
+            bottleneck
+        );
+    } else {
+        println!("netpeek mtu {host}");
+        println!("  iface         {iface}");
+        println!("  local MTU     {local}");
+        if let Some(t) = trace {
+            println!("  tracepath MTU {t}");
+        } else {
+            println!("  tracepath MTU n/a (tracepath not found or no reply)");
+        }
+        println!("  path MTU      {path_mtu}  (max payload {best_payload} + 28)");
+        if bottleneck {
+            println!("  bottleneck    YES  path MTU < local MTU");
+        } else {
+            println!("  bottleneck    no");
+        }
+        if too_big_fails {
+            println!("  icmp frag     oversized DF probe failed (expected)");
+        } else {
+            println!("  icmp frag     oversized DF probe succeeded (unexpected)");
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
 // ---------- svc ----------
 
 const SA_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
@@ -1297,5 +1436,18 @@ mod tests {
             Some("DNS:kubernetes, DNS:kubernetes.default")
         );
         assert_eq!(cert_field(t, "notThere="), None);
+    }
+
+    #[test]
+    fn tracepath_mtu_parsed() {
+        let t = "1:  10.244.1.1                                         0.123ms pmtu 1500\n  2:  10.244.2.7                                         0.456ms\n  3:  10.244.2.7                                         0.789ms reached\n    Resume: pmtu 1500\n";
+        assert_eq!(parse_tracepath_mtu(t), Some(1500));
+
+        let t2 = "1:  10.96.0.1                                          0.123ms pmtu 1372\n  2:  10.244.2.7                                         0.456ms\n";
+        assert_eq!(parse_tracepath_mtu(t2), Some(1372));
+
+        let t3 = "no pmtu here\njust regular output\n";
+        assert_eq!(parse_tracepath_mtu(t3), None);
+        assert_eq!(parse_tracepath_mtu(""), None);
     }
 }
