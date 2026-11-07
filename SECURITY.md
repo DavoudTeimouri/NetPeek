@@ -21,8 +21,7 @@ NetPeek is a privileged debugging tool, not a workload. Treat it accordingly:
   `/var/run/secrets/kubernetes.io/serviceaccount/token` and sends it only to
   `https://kubernetes.default.svc`. It needs just `get services` and
   `list endpointslices`; anything wider is unnecessary.
-- The default image is rebuilt from `alpine:3.20` on every push to `main`. That
-  picks up base-image fixes but is not reproducible. For pinned deployments use a
+- The default image is rebuilt from `alpine:3.24` on every push to `main`. For pinned deployments use a
   `sha-*` tag, a released version tag, or a digest.
 - `netpeek http` shells out to `curl` and `openssl`; both come from Alpine
   packages in this image. If you mount your own binaries over them, you own the
