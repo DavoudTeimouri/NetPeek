@@ -41,6 +41,107 @@ struct Opts {
     verbose: bool,
 }
 
+// ---------- input validation ----------
+
+fn validate_hostname(host: &str) -> Result<(), String> {
+    if host.is_empty() || host.len() > 255 {
+        return Err("hostname empty or >255 chars".into());
+    }
+    if host.starts_with('-') || host.contains('\n') || host.contains('\r') {
+        return Err("hostname contains invalid chars".into());
+    }
+    // IPv6 literal (without brackets, as brackets are stripped by validate_target)
+    if host.contains(':') && !host.contains('.') {
+        // Basic IPv6 literal check - contains colons, no dots, valid hex+colons
+        if !host.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '%') {
+            return Err("invalid IPv6 literal".into());
+        }
+        if host.starts_with(':') && !host.starts_with("::") {
+            return Err("invalid IPv6 literal".into());
+        }
+        return Ok(());
+    }
+    // RFC 1123: labels 1-63 chars, alphanumeric + hyphen, no leading/trailing hyphen
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err("invalid label length".into());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("label cannot start/end with hyphen".into());
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err("label contains invalid chars".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_namespace(ns: &str) -> Result<(), String> {
+    if ns.is_empty() || ns.len() > 63 {
+        return Err("namespace empty or >63 chars".into());
+    }
+    // RFC 1123 label
+    if !ns.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("namespace contains invalid chars".into());
+    }
+    if ns.starts_with('-') || ns.ends_with('-') {
+        return Err("namespace cannot start/end with hyphen".into());
+    }
+    Ok(())
+}
+
+fn validate_url(url: &str) -> Result<(), String> {
+    if url.is_empty() || url.len() > 2048 {
+        return Err("url empty or >2048 chars".into());
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("url must start with http:// or https://".into());
+    }
+    // Basic check for shell metacharacters
+    if url.contains('\n') || url.contains('\r') || url.contains('$') || url.contains('`') || url.contains(';') || url.contains('|') || url.contains('&') || url.contains('>') || url.contains('<') {
+        return Err("url contains invalid chars".into());
+    }
+    Ok(())
+}
+
+fn validate_target(target: &str) -> Result<(), String> {
+    // target is host:port or just host
+    // Check for shell metacharacters in the full target
+    if target.contains(';') || target.contains('|') || target.contains('&') || target.contains('>') || target.contains('<') || target.contains('$') || target.contains('`') {
+        return Err("target contains invalid chars".into());
+    }
+    // Handle IPv6 addresses in brackets: [::1]:8080
+    let host = if target.starts_with('[') {
+        if let Some(end) = target.find(']') {
+            &target[1..end]
+        } else {
+            return Err("invalid IPv6 address format".into());
+        }
+    } else {
+        target.split(':').next().unwrap_or(target)
+    };
+    validate_hostname(host)
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 255 {
+        return Err("name empty or >255 chars".into());
+    }
+    // K8s resource names: RFC 1123 subdomain
+    for label in name.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err("invalid label length".into());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("label cannot start/end with hyphen".into());
+        }
+        if !label.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err("label contains invalid chars".into());
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = env::args().skip(1).collect();
     let (opts, rest) = match parse_args(&argv) {
@@ -68,35 +169,45 @@ fn main() -> ExitCode {
         }
         "info" => run_info(&opts),
         "dns" => match rest.get(1) {
-            Some(n) => run_dns(&opts, n),
+            Some(n) => {
+                if let Err(e) = validate_name(n) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_dns(&opts, n) }
+            }
             None => {
                 eprintln!("netpeek: dns needs a name, e.g. netpeek dns kubernetes.default.svc");
                 ExitCode::from(2)
             }
         },
         "tcp" => match rest.get(1) {
-            Some(t) => run_tcp(&opts, t),
+            Some(t) => {
+                if let Err(e) = validate_target(t) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_tcp(&opts, t) }
+            }
             None => {
                 eprintln!("netpeek: tcp needs <host:port>, e.g. netpeek tcp 10.96.0.1:443");
                 ExitCode::from(2)
             }
         },
         "http" => match rest.get(1) {
-            Some(u) => run_http(&opts, u),
+            Some(u) => {
+                if let Err(e) = validate_url(u) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_http(&opts, u) }
+            }
             None => {
                 eprintln!("netpeek: http needs a url, e.g. netpeek http https://kubernetes.default.svc/healthz");
                 ExitCode::from(2)
             }
         },
         "mtu" => match rest.get(1) {
-            Some(t) => run_mtu(&opts, t),
+            Some(t) => {
+                if let Err(e) = validate_target(t) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_mtu(&opts, t) }
+            }
             None => {
                 eprintln!("netpeek: mtu needs a target, e.g. netpeek mtu 10.244.2.7");
                 ExitCode::from(2)
             }
         },
         "dnsdiag" => match rest.get(1) {
-            Some(n) => run_dnsdiag(&opts, n, rest.get(2).map(|s| s.as_str())),
+            Some(n) => {
+                if let Err(e) = validate_name(n) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_dnsdiag(&opts, n, rest.get(2).map(|s| s.as_str())) }
+            }
             None => {
                 eprintln!("netpeek: dnsdiag needs a name, e.g. netpeek dnsdiag api.external.com [--trace]");
                 ExitCode::from(2)
@@ -1361,6 +1472,16 @@ fn run_svc(o: &Opts, args: &[String]) -> ExitCode {
         }
     };
 
+    // Validate name and namespace
+    if let Err(e) = validate_name(&name) {
+        eprintln!("netpeek: {e}");
+        return ExitCode::from(2);
+    }
+    if let Err(e) = validate_namespace(&ns) {
+        eprintln!("netpeek: {e}");
+        return ExitCode::from(2);
+    }
+
     let svc_json = match api_get(&format!("/api/v1/namespaces/{ns}/services/{name}")) {
         Ok(v) => v,
         Err(e) => return svc_fail(o, &name, &ns, &e),
@@ -1696,5 +1817,75 @@ mod tests {
         let t3 = "no pmtu here\njust regular output\n";
         assert_eq!(parse_tracepath_mtu(t3), None);
         assert_eq!(parse_tracepath_mtu(""), None);
+    }
+
+    #[test]
+    fn validate_hostname_works() {
+        assert!(validate_hostname("example.com").is_ok());
+        assert!(validate_hostname("sub.example.com").is_ok());
+        assert!(validate_hostname(&("a".repeat(63) + ".com")).is_ok());
+        assert!(validate_hostname("example.com").is_ok());
+        assert!(validate_hostname("-example.com").is_err());
+        assert!(validate_hostname("example-.com").is_err());
+        assert!(validate_hostname("example..com").is_err());
+        assert!(validate_hostname("").is_err());
+        assert!(validate_hostname("-").is_err());
+        assert!(validate_hostname(&("a".repeat(64) + ".com")).is_err());
+        assert!(validate_hostname("example.com\n").is_err());
+        assert!(validate_hostname("example.com\r").is_err());
+        assert!(validate_hostname("example.com;").is_err());
+    }
+
+    #[test]
+    fn validate_namespace_works() {
+        assert!(validate_namespace("default").is_ok());
+        assert!(validate_namespace("kube-system").is_ok());
+        assert!(validate_namespace("ns1").is_ok());
+        assert!(validate_namespace(&"a".repeat(63)).is_ok());
+        assert!(validate_namespace("").is_err());
+        assert!(validate_namespace("-default").is_err());
+        assert!(validate_namespace("default-").is_err());
+        assert!(validate_namespace("Default").is_err());
+        assert!(validate_namespace("ns_1").is_err());
+        assert!(validate_namespace(&"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn validate_url_works() {
+        assert!(validate_url("https://example.com").is_ok());
+        assert!(validate_url("http://example.com:8080/path?query=1").is_ok());
+        assert!(validate_url("https://example.com").is_ok());
+        assert!(validate_url("").is_err());
+        assert!(validate_url("ftp://example.com").is_err());
+        assert!(validate_url("not-a-url").is_err());
+        assert!(validate_url("https://example.com;malicious").is_err());
+        assert!(validate_url("https://example.com|malicious").is_err());
+        assert!(validate_url("https://example.com&malicious").is_err());
+        assert!(validate_url("https://example.com>malicious").is_err());
+        assert!(validate_url("https://example.com<malicious").is_err());
+        assert!(validate_url("https://example.com$malicious").is_err());
+        assert!(validate_url("https://example.com`malicious").is_err());
+    }
+
+    #[test]
+    fn validate_target_works() {
+        assert!(validate_target("10.0.0.1:443").is_ok());
+        assert!(validate_target("example.com:8080").is_ok());
+        assert!(validate_target("[::1]:8080").is_ok());
+        assert!(validate_target("example.com").is_ok());
+        assert!(validate_target("10.0.0.1:443;ls").is_err());
+        assert!(validate_target("").is_err());
+    }
+
+    #[test]
+    fn validate_name_works() {
+        assert!(validate_name("kubernetes").is_ok());
+        assert!(validate_name("my-service").is_ok());
+        assert!(validate_name("svc.namespace").is_ok());
+        assert!(validate_name("").is_err());
+        assert!(validate_name("-name").is_err());
+        assert!(validate_name("name-").is_err());
+        assert!(validate_name("Name").is_err());
+        assert!(validate_name("name..service").is_err());
     }
 }
