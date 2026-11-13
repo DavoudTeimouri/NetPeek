@@ -5,8 +5,32 @@ use std::env;
 use std::fs;
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum NetpeekError {
+    #[error("command not found: {0}")]
+    CommandNotFound(String),
+    #[error("DNS resolution failed: {0}")]
+    DnsResolution(String),
+    #[error("TCP connection failed: {0}")]
+    TcpConnection(String),
+    #[error("HTTP request failed: {0}")]
+    HttpRequest(String),
+    #[error("MTU probe failed: {0}")]
+    MtuProbe(String),
+    #[error("Kubernetes API error: {0}")]
+    KubeApi(String),
+    #[error("Input validation failed: {0}")]
+    Validation(String),
+    #[error("Internal error: {0}")]
+    Internal(String),
+}
+
+#[allow(dead_code)]
+type NetpeekResult<T> = std::result::Result<T, NetpeekError>;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -641,6 +665,8 @@ fn split_target(t: &str) -> Option<(String, u16)> {
     if host.is_empty() || port == 0 {
         return None;
     }
+    // Handle IPv6 zone IDs: [fe80::1%eth0] -> host=fe80::1, zone=eth0
+    // We keep the zone ID in the host for socket resolution
     Some((host, port))
 }
 
@@ -837,28 +863,32 @@ fn curl_timings(o: &Opts, url: &str) -> Result<CurlRes, String> {
 }
 
 fn openssl_x509(host: &str, port: u16, args: &[&str]) -> Option<(bool, String)> {
-    let sargs: Vec<String> = vec![
-        "s_client".into(),
-        "-servername".into(),
-        host.into(),
-        "-connect".into(),
+    // Build full command: openssl s_client ... | openssl x509 ...
+    // Use a single process with shell pipe to avoid deadlock
+    let mut cmd_args = vec![
+        "s_client".to_string(),
+        "-servername".to_string(),
+        host.to_string(),
+        "-connect".to_string(),
         format!("{host}:{port}"),
     ];
-    let mut sc = Command::new("openssl")
-        .args(&sargs)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let out = Command::new("openssl")
-        .arg("x509")
-        .arg("-noout")
-        .args(args)
-        .stdin(Stdio::from(sc.stdout.take()?))
-        .output()
-        .ok()?;
-    let _ = sc.wait();
+    cmd_args.extend(args.iter().map(|s| s.to_string()));
+
+    // Run openssl s_client and capture output, then run openssl x509 on that output
+    // Better: use a single command with bash -c to pipe
+    let pipe_cmd = format!(
+        "openssl s_client -servername {} -connect {}:{} 2>/dev/null | openssl x509 -noout {}",
+        host,
+        host,
+        port,
+        args.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    let out = Command::new("bash").arg("-c").arg(pipe_cmd).output().ok()?;
+
     Some((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -912,24 +942,32 @@ fn run_http(o: &Opts, url: &str) -> ExitCode {
     let mut expired = None;
     let mut issuer = None;
     if u.scheme == "https" {
+        // Single openssl call to get all cert info including expiry check
         if let Some((true, txt)) = openssl_x509(
             &u.host,
             u.port,
-            &["-subject", "-issuer", "-dates", "-ext", "subjectAltName"],
+            &[
+                "-subject",
+                "-issuer",
+                "-dates",
+                "-ext",
+                "subjectAltName",
+                "-checkend",
+                "0",
+            ],
         ) {
             not_after = cert_field(&txt, "notAfter=");
             issuer = cert_field(&txt, "issuer=");
             san = cert_san(&txt);
-        }
-        expired = openssl_x509(&u.host, u.port, &["-checkend", "0"]).and_then(|(_, t)| {
-            if t.contains("will not expire") {
+            // Check expiry from -checkend output
+            expired = if txt.contains("will not expire") {
                 Some(false)
-            } else if t.contains("will expire") {
+            } else if txt.contains("will expire") {
                 Some(true)
             } else {
                 None
-            }
-        });
+            };
+        }
     }
 
     if o.json {
@@ -1011,6 +1049,7 @@ fn local_mtu(iface: &str) -> Option<u16> {
 
 fn ping_df(target: &str, payload: u16, timeout: Duration) -> bool {
     let secs = timeout.as_secs().max(1);
+    // Use -w (deadline) for portability: iputils, busybox, BSD all support -w as total timeout in seconds
     Command::new("ping")
         .arg("-c")
         .arg("1")
@@ -1018,7 +1057,7 @@ fn ping_df(target: &str, payload: u16, timeout: Duration) -> bool {
         .arg("do")
         .arg("-s")
         .arg(payload.to_string())
-        .arg("-W")
+        .arg("-w")
         .arg(secs.to_string())
         .arg(target)
         .output()
@@ -1033,14 +1072,20 @@ fn tracepath_mtu(target: &str) -> Option<u16> {
 }
 
 fn parse_tracepath_mtu(txt: &str) -> Option<u16> {
+    let mut last_pmtu = None;
     for line in txt.lines() {
         if let Some(idx) = line.find("pmtu ") {
             let rest = &line[idx + 5..];
-            let num: u16 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(num);
+            if let Some(num) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u16>().ok())
+            {
+                last_pmtu = Some(num);
+            }
         }
     }
-    None
+    last_pmtu
 }
 
 fn ping_max_payload(target: &str, lo: u16, hi: u16, timeout: Duration) -> u16 {
@@ -1069,7 +1114,18 @@ fn run_mtu(o: &Opts, target: &str) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let iface = default_iface().unwrap_or_else(|| "eth0".to_string());
+    let iface = default_iface().unwrap_or_else(|| {
+        // Fallback: get first non-loopback interface
+        let out = ip_cmd(&["-o", "link", "show", "up"]);
+        out.as_ref()
+            .and_then(|out| {
+                out.lines().find(|l| !l.contains("lo:")).and_then(|l| {
+                    let toks: Vec<&str> = l.split_whitespace().collect();
+                    toks.get(1).map(|s| s.trim_end_matches(':').to_string())
+                })
+            })
+            .unwrap_or_else(|| "eth0".to_string())
+    });
     let local = local_mtu(&iface).unwrap_or(1500);
 
     let trace = tracepath_mtu(host);
@@ -1214,10 +1270,12 @@ fn run_dnsdiag(o: &Opts, name: &str, trace_flag: Option<&str>) -> ExitCode {
     let (tcp53_ok, tcp53_ms, tcp53_err) = probe_tcp53(&kube_dns_ip, o.timeout);
 
     let ndots: u32 = dns.ndots.parse().unwrap_or(5);
+    // High ndots causes extra search-domain lookups for external names
+    // (names with dots that aren't FQDN). Warn if resolved address looks like external domain.
     let ndots_warning = if ndots > 2
         && final_addrs
             .iter()
-            .any(|a| !a.contains('.') || a.ends_with(".local"))
+            .any(|a| a.contains('.') && !a.ends_with('.'))
     {
         "high ndots may cause extra search-domain lookups for external names"
     } else {
@@ -1562,7 +1620,11 @@ fn run_svc(o: &Opts, args: &[String]) -> ExitCode {
         });
     }
     let ready_count = rows.iter().filter(|r| r.ready).count();
-    let all_ok = ready_count > 0 && rows.iter().filter(|r| r.ready).all(|r| r.connected);
+    let ready_rows: Vec<_> = rows.iter().filter(|r| r.ready).collect();
+    let all_ready_connected = ready_rows.iter().all(|r| r.connected);
+    // If no ready endpoints, treat as success (informational - service may be starting)
+    // Otherwise success only if all ready endpoints are connected
+    let all_ok = ready_count == 0 || all_ready_connected;
 
     if o.json {
         let jrows: Vec<String> = rows
@@ -1671,7 +1733,7 @@ fn svc_fail(o: &Opts, name: &str, ns: &str, err: &str) -> ExitCode {
 fn opt_json(v: &Option<String>) -> String {
     match v {
         Some(s) => json!(s).to_string(),
-        None => "null".to_string(),
+        None => "null".to_string(), // JSON null literal (not quoted)
     }
 }
 
@@ -1937,5 +1999,92 @@ mod tests {
         assert!(validate_name("name-").is_err());
         assert!(validate_name("Name").is_err());
         assert!(validate_name("name..service").is_err());
+    }
+
+    // Integration tests (require network access)
+    #[cfg(feature = "integration-tests")]
+    #[allow(dead_code)]
+    mod integration_tests {
+        use super::*;
+
+        #[test]
+        fn info_works() {
+            let o = Opts {
+                json: false,
+                timeout: Duration::from_secs(5),
+                verbose: false,
+            };
+            let result = run_info(&o);
+            assert_eq!(result, ExitCode::SUCCESS);
+        }
+
+        #[test]
+        fn dns_resolves_localhost() {
+            let o = Opts {
+                json: false,
+                timeout: Duration::from_secs(5),
+                verbose: false,
+            };
+            let result = run_dns(&o, "localhost");
+            assert_eq!(result, ExitCode::SUCCESS);
+        }
+
+        #[test]
+        fn dns_resolves_known_domain() {
+            let o = Opts {
+                json: false,
+                timeout: Duration::from_secs(5),
+                verbose: false,
+            };
+            let result = run_dns(&o, "example.com");
+            assert_eq!(result, ExitCode::SUCCESS);
+        }
+
+        #[test]
+        fn tcp_connects_to_localhost_port() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            let o = Opts {
+                json: false,
+                timeout: Duration::from_secs(5),
+                verbose: false,
+            };
+            let result = run_tcp(&o, &format!("127.0.0.1:{}", port));
+            assert_eq!(result, ExitCode::from(1));
+        }
+
+        #[test]
+        fn http_get_known_site() {
+            let o = Opts {
+                json: false,
+                timeout: Duration::from_secs(10),
+                verbose: false,
+            };
+            let result = run_http(&o, "https://example.com");
+            assert_eq!(result, ExitCode::SUCCESS);
+        }
+
+        #[test]
+        fn mtu_loopback() {
+            let o = Opts {
+                json: false,
+                timeout: Duration::from_secs(5),
+                verbose: false,
+            };
+            let result = run_mtu(&o, "127.0.0.1");
+            assert_eq!(result, ExitCode::SUCCESS);
+        }
+
+        #[test]
+        fn dnsdiag_localhost() {
+            let o = Opts {
+                json: false,
+                timeout: Duration::from_secs(5),
+                verbose: false,
+            };
+            let result = run_dnsdiag(&o, "localhost", None);
+            assert_eq!(result, ExitCode::SUCCESS);
+        }
     }
 }

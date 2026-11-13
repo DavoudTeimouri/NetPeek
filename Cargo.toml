@@ -9,6 +9,11 @@ license = "MIT"
 # ponytail: one dep, only for parsing Kubernetes API JSON. Hand-rolled JSON
 # parsing of untrusted API bodies is the wrong kind of clever.
 serde_json = "1"
+# Error handling with typed errors
+thiserror = "1"
+
+[features]
+integration-tests = []
 
 [[bin]]
 name = "netpeek"
