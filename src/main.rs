@@ -1499,13 +1499,33 @@ fn svc_fail(o: &Opts, name: &str, ns: &str, err: &str) -> ExitCode {
 
 fn opt_json(v: &Option<String>) -> String {
     match v {
-        Some(s) => jstr(s),
+        Some(s) => json!(s).to_string(),
         None => "null".to_string(),
     }
 }
 
 // ---------- json ----------
 
+use serde_json::{json, Value as JsonValue};
+
+fn jstr(s: &str) -> String {
+    json!(s).to_string()
+}
+
+fn jarr(v: &[String]) -> String {
+    json!(v).to_string()
+}
+
+#[allow(dead_code)]
+fn json_obj(pairs: &[(&str, JsonValue)]) -> String {
+    let obj: serde_json::Map<String, JsonValue> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    json!(obj).to_string()
+}
+
+#[allow(dead_code)]
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1520,15 +1540,6 @@ fn esc(s: &str) -> String {
         }
     }
     o
-}
-
-fn jstr(s: &str) -> String {
-    format!("\"{}\"", esc(s))
-}
-
-fn jarr(v: &[String]) -> String {
-    let items: Vec<String> = v.iter().map(|s| jstr(s)).collect();
-    format!("[{}]", items.join(","))
 }
 
 #[cfg(test)]
