@@ -148,3 +148,4 @@ timings from `curl`, certificate detail from `openssl`.
 - [Changelog](CHANGELOG.md)
 - [Security policy](SECURITY.md)
 - [Issues](https://github.com/DavoudTeimouri/NetPeek/issues) · [Discussions](https://github.com/DavoudTeimouri/NetPeek/discussions)
+# CI trigger
