@@ -95,6 +95,13 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "dnsdiag" => match rest.get(1) {
+            Some(n) => run_dnsdiag(&opts, n, rest.get(2).map(|s| s.as_str())),
+            None => {
+                eprintln!("netpeek: dnsdiag needs a name, e.g. netpeek dnsdiag api.external.com [--trace]");
+                ExitCode::from(2)
+            }
+        },
         "svc" => {
             if rest.len() < 2 {
                 eprintln!(
@@ -953,6 +960,235 @@ fn run_mtu(o: &Opts, target: &str) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+// ---------- dnsdiag ----------
+
+struct DnsStep {
+    query: String,
+    ok: bool,
+    addrs: Vec<String>,
+    rtt_ms: f64,
+    error: Option<String>,
+}
+
+fn run_dnsdiag(o: &Opts, name: &str, trace_flag: Option<&str>) -> ExitCode {
+    let trace = trace_flag == Some("--trace");
+    let dns = parse_resolv(&fs::read_to_string("/etc/resolv.conf").unwrap_or_default());
+
+    let search_domains = if dns.search.is_empty() {
+        vec!["".to_string()]
+    } else {
+        dns.search
+            .iter()
+            .cloned()
+            .chain(std::iter::once("".to_string()))
+            .collect()
+    };
+
+    let mut steps = Vec::new();
+    let mut total_rtt = 0.0;
+    let mut nxdomain_count = 0;
+
+    for sd in &search_domains {
+        let query = if sd.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}.{sd}")
+        };
+
+        let t0 = Instant::now();
+        match (query.as_str(), 0u16).to_socket_addrs() {
+            Ok(iter) => {
+                let rtt = t0.elapsed().as_secs_f64() * 1000.0;
+                let mut addrs: Vec<String> = iter.map(|a| a.ip().to_string()).collect();
+                addrs.sort();
+                addrs.dedup();
+                total_rtt += rtt;
+                if trace {
+                    println!("  {query} -> {} ({:.1} ms)", addrs.join(", "), rtt);
+                }
+                steps.push(DnsStep {
+                    query,
+                    ok: true,
+                    addrs,
+                    rtt_ms: rtt,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                let rtt = t0.elapsed().as_secs_f64() * 1000.0;
+                total_rtt += rtt;
+                if e.to_string().contains("NXDOMAIN") || e.to_string().contains("no such host") {
+                    nxdomain_count += 1;
+                }
+                if trace {
+                    println!("  {query} -> NXDOMAIN ({:.1} ms)", rtt);
+                }
+                steps.push(DnsStep {
+                    query,
+                    ok: false,
+                    addrs: vec![],
+                    rtt_ms: rtt,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    // First successful answer
+    let final_addrs: Vec<String> = steps
+        .iter()
+        .find(|s| s.ok)
+        .map(|s| s.addrs.clone())
+        .unwrap_or_default();
+
+    // NetworkPolicy check: UDP/53 + TCP/53 to kube-dns ClusterIP
+    let kube_dns_ip = dns
+        .nameservers
+        .first()
+        .cloned()
+        .unwrap_or("10.96.0.10".to_string());
+    let (udp53_ok, udp53_ms, udp53_err) = probe_udp53(&kube_dns_ip, o.timeout);
+    let (tcp53_ok, tcp53_ms, tcp53_err) = probe_tcp53(&kube_dns_ip, o.timeout);
+
+    let ndots: u32 = dns.ndots.parse().unwrap_or(5);
+    let ndots_warning = if ndots > 2
+        && final_addrs
+            .iter()
+            .any(|a| !a.contains('.') || a.ends_with(".local"))
+    {
+        "high ndots may cause extra search-domain lookups for external names"
+    } else {
+        ""
+    };
+
+    if o.json {
+        let jsteps: Vec<String> = steps
+            .iter()
+            .map(|s| {
+                format!(
+                    "{{\"query\":{},\"ok\":{},\"addrs\":{},\"rtt_ms\":{:.3},\"error\":{}}}",
+                    jstr(&s.query),
+                    s.ok,
+                    jarr(&s.addrs),
+                    s.rtt_ms,
+                    s.error
+                        .as_ref()
+                        .map(|e| jstr(e))
+                        .unwrap_or("null".to_string())
+                )
+            })
+            .collect();
+        println!(
+            "{{\"command\":\"dnsdiag\",\"name\":{},\"final_addrs\":{},\"steps\":[{}],\"total_rtt_ms\":{:.3},\"nxdomain_count\":{},\"ndots\":{},\"ndots_warning\":{},\"udp53\":{{\"ok\":{},\"rtt_ms\":{:.3},\"error\":{}}},\"tcp53\":{{\"ok\":{},\"rtt_ms\":{:.3},\"error\":{}}}}}",
+            jstr(name),
+            jarr(&final_addrs),
+            jsteps.join(","),
+            total_rtt,
+            nxdomain_count,
+            ndots,
+            jstr(ndots_warning),
+            udp53_ok,
+            udp53_ms,
+            opt_json(&if udp53_err.is_empty() { None } else { Some(udp53_err) }),
+            tcp53_ok,
+            tcp53_ms,
+            opt_json(&if tcp53_err.is_empty() { None } else { Some(tcp53_err) })
+        );
+    } else {
+        println!("netpeek dnsdiag {name}");
+        println!(
+            "  final addrs {}",
+            if final_addrs.is_empty() {
+                "-".to_string()
+            } else {
+                final_addrs.join(", ")
+            }
+        );
+        println!("  total RTT   {:.1} ms", total_rtt);
+        println!("  NXDOMAIN    {}", nxdomain_count);
+        println!(
+            "  searchdoms  {}",
+            search_domains.iter().filter(|s| !s.is_empty()).count()
+        );
+        println!(
+            "  ndots       {}{}",
+            ndots,
+            if ndots_warning.is_empty() {
+                ""
+            } else {
+                "  WARNING: "
+            }
+        );
+        if !ndots_warning.is_empty() {
+            println!("               {ndots_warning}");
+        }
+        println!(
+            "  UDP/53      {}  ({:.1} ms)",
+            if udp53_ok { "ok" } else { "FAILED" },
+            udp53_ms
+        );
+        if !udp53_err.is_empty() {
+            println!("               {udp53_err}");
+        }
+        println!(
+            "  TCP/53      {}  ({:.1} ms)",
+            if tcp53_ok { "ok" } else { "FAILED" },
+            tcp53_ms
+        );
+        if !tcp53_err.is_empty() {
+            println!("               {tcp53_err}");
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn probe_udp53(server: &str, timeout: Duration) -> (bool, f64, String) {
+    // Use dig +timeout +tries=1 for UDP
+    let t0 = Instant::now();
+    let out = Command::new("dig")
+        .args(&[
+            format!("@{server}"),
+            "kubernetes.default.svc".to_string(),
+            "+short".to_string(),
+            format!("+timeout={}", timeout.as_secs().max(1)),
+            "+tries=1".to_string(),
+            "+retry=0".to_string(),
+            format!("+time={}", timeout.as_secs().max(1)),
+        ])
+        .output();
+    let rtt = t0.elapsed().as_secs_f64() * 1000.0;
+    match out {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => (true, rtt, String::new()),
+        Ok(o) => (
+            false,
+            rtt,
+            String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        ),
+        Err(e) => (false, rtt, e.to_string()),
+    }
+}
+
+fn probe_tcp53(server: &str, timeout: Duration) -> (bool, f64, String) {
+    let t0 = Instant::now();
+    let target = format!("{server}:53");
+    match target.parse::<SocketAddr>() {
+        Ok(addr) => match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(_) => (true, t0.elapsed().as_secs_f64() * 1000.0, String::new()),
+            Err(e) => (
+                false,
+                t0.elapsed().as_secs_f64() * 1000.0,
+                err_class(&e).to_string(),
+            ),
+        },
+        Err(_) => (
+            false,
+            t0.elapsed().as_secs_f64() * 1000.0,
+            "bad-addr".to_string(),
+        ),
+    }
 }
 
 // ---------- svc ----------

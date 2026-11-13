@@ -51,6 +51,7 @@ docker run --rm ghcr.io/davoudteimouri/netpeek:latest netpeek info --json
 | `netpeek tcp <host:port>` | does the socket accept, latency, and failure class (`refused`, `timeout`, `network-unreachable`, `host-unreachable`) |
 | `netpeek http <url>` | HTTP status, DNS/connect/TLS/TTFB breakdown, TLS issuer, cert expiry and SANs |
 | `netpeek mtu <target>` | Path MTU / PMTU blackhole via DF-bit ping sweep + tracepath; flags bottleneck vs local MTU |
+| `netpeek dnsdiag <name> [--trace]` | Per-search-domain resolution + RTT, NXDOMAIN count, ndots impact, UDP/53 + TCP/53 reachability |
 | `netpeek svc <name> [-n ns]` | Service → ClusterIP → endpoint slices → TCP probe of every backend, ready and not-ready |
 
 Flags: `--json` (machine output), `--timeout <secs>` (TCP connect timeout, default 5), `-v`.

@@ -13,6 +13,10 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   binary search + `tracepath`. Reports local MTU, path MTU, max payload, and
   bottleneck flag. Zero new dependencies (`iproute2`, `iputils` already in
   image).
+- `netpeek dnsdiag <name> [--trace]`: per-search-domain resolution timing,
+  NXDOMAIN count, `ndots` impact warning, and NetworkPolicy UDP/53 + TCP/53
+  reachability check to the kube-dns ClusterIP. Zero new dependencies
+  (`dig`, `getaddrinfo` already in image).
 
 ## [0.2.0] - 2026-10-29
 
