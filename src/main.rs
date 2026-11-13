@@ -53,7 +53,10 @@ fn validate_hostname(host: &str) -> Result<(), String> {
     // IPv6 literal (without brackets, as brackets are stripped by validate_target)
     if host.contains(':') && !host.contains('.') {
         // Basic IPv6 literal check - contains colons, no dots, valid hex+colons
-        if !host.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '%') {
+        if !host
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '%')
+        {
             return Err("invalid IPv6 literal".into());
         }
         if host.starts_with(':') && !host.starts_with("::") {
@@ -81,7 +84,10 @@ fn validate_namespace(ns: &str) -> Result<(), String> {
         return Err("namespace empty or >63 chars".into());
     }
     // RFC 1123 label
-    if !ns.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !ns
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return Err("namespace contains invalid chars".into());
     }
     if ns.starts_with('-') || ns.ends_with('-') {
@@ -98,7 +104,16 @@ fn validate_url(url: &str) -> Result<(), String> {
         return Err("url must start with http:// or https://".into());
     }
     // Basic check for shell metacharacters
-    if url.contains('\n') || url.contains('\r') || url.contains('$') || url.contains('`') || url.contains(';') || url.contains('|') || url.contains('&') || url.contains('>') || url.contains('<') {
+    if url.contains('\n')
+        || url.contains('\r')
+        || url.contains('$')
+        || url.contains('`')
+        || url.contains(';')
+        || url.contains('|')
+        || url.contains('&')
+        || url.contains('>')
+        || url.contains('<')
+    {
         return Err("url contains invalid chars".into());
     }
     Ok(())
@@ -107,7 +122,14 @@ fn validate_url(url: &str) -> Result<(), String> {
 fn validate_target(target: &str) -> Result<(), String> {
     // target is host:port or just host
     // Check for shell metacharacters in the full target
-    if target.contains(';') || target.contains('|') || target.contains('&') || target.contains('>') || target.contains('<') || target.contains('$') || target.contains('`') {
+    if target.contains(';')
+        || target.contains('|')
+        || target.contains('&')
+        || target.contains('>')
+        || target.contains('<')
+        || target.contains('$')
+        || target.contains('`')
+    {
         return Err("target contains invalid chars".into());
     }
     // Handle IPv6 addresses in brackets: [::1]:8080
@@ -135,7 +157,10 @@ fn validate_name(name: &str) -> Result<(), String> {
         if label.starts_with('-') || label.ends_with('-') {
             return Err("label cannot start/end with hyphen".into());
         }
-        if !label.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        if !label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
             return Err("label contains invalid chars".into());
         }
     }
@@ -170,7 +195,12 @@ fn main() -> ExitCode {
         "info" => run_info(&opts),
         "dns" => match rest.get(1) {
             Some(n) => {
-                if let Err(e) = validate_name(n) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_dns(&opts, n) }
+                if let Err(e) = validate_name(n) {
+                    eprintln!("netpeek: {e}");
+                    ExitCode::from(2)
+                } else {
+                    run_dns(&opts, n)
+                }
             }
             None => {
                 eprintln!("netpeek: dns needs a name, e.g. netpeek dns kubernetes.default.svc");
@@ -179,7 +209,12 @@ fn main() -> ExitCode {
         },
         "tcp" => match rest.get(1) {
             Some(t) => {
-                if let Err(e) = validate_target(t) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_tcp(&opts, t) }
+                if let Err(e) = validate_target(t) {
+                    eprintln!("netpeek: {e}");
+                    ExitCode::from(2)
+                } else {
+                    run_tcp(&opts, t)
+                }
             }
             None => {
                 eprintln!("netpeek: tcp needs <host:port>, e.g. netpeek tcp 10.96.0.1:443");
@@ -188,7 +223,12 @@ fn main() -> ExitCode {
         },
         "http" => match rest.get(1) {
             Some(u) => {
-                if let Err(e) = validate_url(u) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_http(&opts, u) }
+                if let Err(e) = validate_url(u) {
+                    eprintln!("netpeek: {e}");
+                    ExitCode::from(2)
+                } else {
+                    run_http(&opts, u)
+                }
             }
             None => {
                 eprintln!("netpeek: http needs a url, e.g. netpeek http https://kubernetes.default.svc/healthz");
@@ -197,7 +237,12 @@ fn main() -> ExitCode {
         },
         "mtu" => match rest.get(1) {
             Some(t) => {
-                if let Err(e) = validate_target(t) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_mtu(&opts, t) }
+                if let Err(e) = validate_target(t) {
+                    eprintln!("netpeek: {e}");
+                    ExitCode::from(2)
+                } else {
+                    run_mtu(&opts, t)
+                }
             }
             None => {
                 eprintln!("netpeek: mtu needs a target, e.g. netpeek mtu 10.244.2.7");
@@ -206,7 +251,12 @@ fn main() -> ExitCode {
         },
         "dnsdiag" => match rest.get(1) {
             Some(n) => {
-                if let Err(e) = validate_name(n) { eprintln!("netpeek: {e}"); ExitCode::from(2) } else { run_dnsdiag(&opts, n, rest.get(2).map(|s| s.as_str())) }
+                if let Err(e) = validate_name(n) {
+                    eprintln!("netpeek: {e}");
+                    ExitCode::from(2)
+                } else {
+                    run_dnsdiag(&opts, n, rest.get(2).map(|s| s.as_str()))
+                }
             }
             None => {
                 eprintln!("netpeek: dnsdiag needs a name, e.g. netpeek dnsdiag api.external.com [--trace]");
